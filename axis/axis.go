@@ -116,6 +116,9 @@ func (a *Axis) ClearTarget() {
 
 // SoftStop commands a controlled maximum-deceleration stop to the current
 // natural stopping point; new motion can be commanded afterwards.
+//
+// Soft stop at this layer means "drop the goal and brake to rest". Compare
+// Pause, which keeps the goal and resumes automatically.
 func (a *Axis) SoftStop() {
 	if a.estopped {
 		return
@@ -123,6 +126,20 @@ func (a *Axis) SoftStop() {
 	a.hasGoal = false
 	if a.vel == 0 {
 		a.mode = Idle
+		return
+	}
+	a.mode = SoftStopping
+}
+
+// Pause brakes to rest exactly like SoftStop but KEEPS the commanded goal:
+// once the axis reaches zero velocity it automatically resumes moving toward
+// the target. This is the low-level building block for callers that want a
+// soft stop preserving the current target instead of ending the motion.
+func (a *Axis) Pause() {
+	if a.estopped {
+		return
+	}
+	if a.vel == 0 {
 		return
 	}
 	a.mode = SoftStopping
@@ -154,7 +171,12 @@ func (a *Axis) Step() {
 	case SoftStopping, EmergencyStopping:
 		a.brakeToRest()
 		if a.vel == 0 && a.mode == SoftStopping {
-			a.mode = Idle
+			if a.hasGoal {
+				// Paused with a kept goal: resume toward the target.
+				a.mode = Moving
+			} else {
+				a.mode = Idle
+			}
 		}
 	case Moving:
 		a.stepTowardTarget()

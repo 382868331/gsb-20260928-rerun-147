@@ -93,12 +93,26 @@ func (e *Executor) CancelQueued() []*Move {
 
 // SoftStop aborts the active motion and cancels queued work, then brakes
 // smoothly to rest. A new target may be commanded afterwards.
+//
+// At the orchestration layer SoftStop means "end the queue": the active
+// motion is Aborted and every pending motion is Canceled. Compare
+// SoftStopKeepTarget, which keeps the active target and the queue.
 func (e *Executor) SoftStop() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.abortActiveLocked(AbortedSoftStop)
 	e.cancelAllLocked()
 	e.ax.SoftStop()
+}
+
+// SoftStopKeepTarget brakes smoothly to rest but keeps the active motion's
+// target and leaves the pending queue untouched. Once the axis is at rest it
+// automatically resumes toward the kept target and the queue continues
+// afterwards. Use SoftStop instead to end the queue.
+func (e *Executor) SoftStopKeepTarget() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.ax.Pause()
 }
 
 // EmergencyStop aborts the active motion, cancels queued work and latches an
