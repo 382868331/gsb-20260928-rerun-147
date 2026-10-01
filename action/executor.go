@@ -24,6 +24,11 @@ type Executor struct {
 	active *Move
 	queue  []*Move
 
+	// holdActive is set by a keep-goal soft stop: the active motion stays
+	// Active while the axis brakes, and its goal is re-issued once the axis
+	// is at rest. Persisted so a save/restore mid-stop resumes identically.
+	holdActive bool
+
 	now func() time.Time
 	seq uint64
 }
@@ -91,11 +96,42 @@ func (e *Executor) CancelQueued() []*Move {
 	return canceled
 }
 
+// StopPolicy selects what a soft stop does to the commanded work. The two
+// layers mean different things by soft stop:
+//
+//   - axis layer: only decelerate to rest and drop the axis-level goal.
+//   - executor layer: decide the fate of the active motion and the queue.
+type StopPolicy int
+
+const (
+	// StopEndQueue aborts the active motion and cancels every queued motion.
+	// This is the historical default of SoftStop.
+	StopEndQueue StopPolicy = iota
+	// StopKeepGoal brakes to rest but keeps the active motion and the queue:
+	// once the axis is at rest the same goal is re-issued from the real
+	// stopped position and the remaining queue continues afterwards.
+	StopKeepGoal
+)
+
 // SoftStop aborts the active motion and cancels queued work, then brakes
-// smoothly to rest. A new target may be commanded afterwards.
+// smoothly to rest (StopEndQueue). A new target may be commanded afterwards.
 func (e *Executor) SoftStop() {
+	e.SoftStopWithPolicy(StopEndQueue)
+}
+
+// SoftStopWithPolicy brakes smoothly to rest and applies the given policy to
+// the active motion and the queue.
+func (e *Executor) SoftStopWithPolicy(p StopPolicy) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if p == StopKeepGoal {
+		// Keep the active motion and queue; the axis drops its goal while
+		// braking, so remember to re-issue it once at rest.
+		e.holdActive = e.active != nil && e.active.State() == Active
+		e.ax.SoftStop()
+		return
+	}
+	e.holdActive = false
 	e.abortActiveLocked(AbortedSoftStop)
 	e.cancelAllLocked()
 	e.ax.SoftStop()
@@ -106,6 +142,7 @@ func (e *Executor) SoftStop() {
 func (e *Executor) EmergencyStop() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.holdActive = false
 	e.abortActiveLocked(AbortedEmergencyStop)
 	e.cancelAllLocked()
 	e.ax.EmergencyStop()
@@ -142,6 +179,16 @@ func (e *Executor) Step() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.ax.Step()
+
+	// A keep-goal soft stop re-issues the held goal once the axis is at rest.
+	if e.holdActive && e.ax.Mode() == axis.Idle && !e.ax.EmergencyStopped() {
+		e.holdActive = false
+		if e.active != nil && e.active.State() == Active {
+			if err := e.ax.SetTarget(e.active.Target); err != nil {
+				e.abortActiveLocked(AbortedSoftStop)
+			}
+		}
+	}
 
 	// If the active move reached its target while Moving, complete it and start
 	// the next pending motion.
@@ -209,10 +256,11 @@ type wireMove struct {
 // ExecutorSnapshot captures the axis mid-motion state plus the queue. It does
 // not claim any motion has reached its target.
 type ExecutorSnapshot struct {
-	Config axis.Config   `json:"config"`
-	Axis   axis.Snapshot `json:"axis"`
-	Active *wireMove     `json:"active"`
-	Queue  []*wireMove   `json:"queue"`
+	Config     axis.Config   `json:"config"`
+	Axis       axis.Snapshot `json:"axis"`
+	Active     *wireMove     `json:"active"`
+	Queue      []*wireMove   `json:"queue"`
+	HoldActive bool          `json:"hold_active"`
 }
 
 // Save serializes the full executor state.
@@ -220,9 +268,10 @@ func (e *Executor) Save() ([]byte, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	snap := ExecutorSnapshot{
-		Config: e.cfg,
-		Axis:   e.ax.Snapshot(),
-		Queue:  make([]*wireMove, 0, len(e.queue)),
+		Config:     e.cfg,
+		Axis:       e.ax.Snapshot(),
+		Queue:      make([]*wireMove, 0, len(e.queue)),
+		HoldActive: e.holdActive,
 	}
 	if e.active != nil {
 		snap.Active = toWire(e.active)
@@ -246,10 +295,10 @@ func RestoreExecutor(data []byte) (*Executor, error) {
 		return nil, err
 	}
 	ax.Restore(snap.Axis)
-	e := &Executor{ax: ax, cfg: snap.Config, now: time.Now}
+	e := &Executor{ax: ax, cfg: snap.Config, now: time.Now, holdActive: snap.HoldActive}
 	if snap.Active != nil {
 		e.active = fromWire(snap.Active)
-		if e.active.State() == Active && !snap.Axis.HasGoal {
+		if e.active.State() == Active && !snap.Axis.HasGoal && !snap.HoldActive {
 			return nil, errors.New("action: active motion restored without an axis goal")
 		}
 	}
