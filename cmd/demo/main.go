@@ -24,6 +24,12 @@ func runGroup(g *action.Group, cond func() bool) {
 	}
 }
 
+func runCell(c *action.Cell, cond func() bool) {
+	for i := 0; i < 5_000_000 && !cond(); i++ {
+		c.Step()
+	}
+}
+
 func main() {
 	fmt.Println("== 1. single-axis queue and lifecycle ==")
 	e, _ := action.NewExecutor(cfg)
@@ -114,4 +120,21 @@ func main() {
 	runGroup(g2, func() bool { return ga.State() == action.Aborted })
 	fmt.Printf("abort-all reaction: move=%v, others braked to vel=(%.3f, %.3f, %.3f)\n",
 		ga.State(), g2.Axes()[0].Velocity(), g2.Axes()[1].Velocity(), g2.Axes()[2].Velocity())
+
+	fmt.Println("\n== 7. cell: cross-axis groups hand off on explicit condition ==")
+	c := action.NewCell()
+	for _, name := range []string{"x", "y", "z"} {
+		_ = c.AddAxis(name, cfg)
+	}
+	ca, _ := c.NewGroup("A", []string{"x", "y"}, action.ReactDecelerateAndWait)
+	cb, _ := c.NewGroup("B", []string{"y", "z"}, action.ReactDecelerateAndWait)
+	ma, _ := ca.EnqueueWithHandoff([]float64{10, 10}, nil, nil, nil)
+	mb, _ := cb.EnqueueWithHandoff([]float64{20, 10}, nil,
+		&action.HandoffConditions{Axes: []action.AxisCondition{
+			{Axis: "y", AtLeast: 10, AtLeastSet: true}}}, nil)
+	fmt.Printf("A=%v B=%v (waiting for y at rest >= 10)\n", ma.State(), mb.State())
+	runCell(c, func() bool { return mb.State() == action.Completed })
+	h := mb.Handoffs()[0]
+	fmt.Printf("handoff y: %s -> %s at %.3f (atRest=%v); endpoints y=%.3f z=%.3f\n",
+		h.FromID, h.ToID, h.At, h.AtRest, c.Axis("y").Position(), c.Axis("z").Position())
 }

@@ -147,8 +147,8 @@ func TestGroupEmergencyStopAndRecovery(t *testing.T) {
 		g.Step()
 	}
 	g.EmergencyStop()
-	if m.State() != Aborted || m.AbortReason() != AbortedEmergencyStop {
-		t.Fatalf("abort wrong: %v/%v", m.State(), m.AbortReason())
+	if m.State() != Stopping || m.AbortReason() != AbortedEmergencyStop {
+		t.Fatalf("move must be Stopping while the axis is still braking: %v/%v", m.State(), m.AbortReason())
 	}
 	stepGroupUntil(t, g, func() bool {
 		for _, ax := range g.Axes() {
@@ -158,6 +158,7 @@ func TestGroupEmergencyStopAndRecovery(t *testing.T) {
 		}
 		return true
 	})
+	// Settled but still latched: ownership is not released and new work waits.
 	if _, err := g.Enqueue([]float64{1, 1, 1}); err != nil {
 		t.Fatal(err)
 	}
@@ -167,6 +168,7 @@ func TestGroupEmergencyStopAndRecovery(t *testing.T) {
 	if err := g.Reset(); err != nil {
 		t.Fatal(err)
 	}
+	stepGroupUntil(t, g, func() bool { return m.State() == Aborted })
 	stepGroupUntil(t, g, func() bool { return g.Active() == nil && len(g.Pending()) == 0 })
 	for i, ax := range g.Axes() {
 		if math.Abs(ax.Position()-1) > 1e-9 {

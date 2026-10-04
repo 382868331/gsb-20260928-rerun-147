@@ -26,6 +26,14 @@ const (
 	Canceled
 	// Aborted motions started but were interrupted (stop or replaced target).
 	Aborted
+	// Waiting motions have not acquired every axis they need yet, or are
+	// blocked on an explicit handoff condition from the group currently
+	// holding one of their axes. No displacement has happened under them.
+	Waiting
+	// Stopping motions executed at least part of their displacement and are
+	// now braking to a safe stop. They keep ownership of their axes until
+	// every axis is at rest; the displacement cannot be undone.
+	Stopping
 )
 
 // IsTerminal reports whether the lifecycle has ended.
@@ -46,6 +54,10 @@ func (s State) String() string {
 		return "Canceled"
 	case Aborted:
 		return "Aborted"
+	case Waiting:
+		return "Waiting"
+	case Stopping:
+		return "Stopping"
 	default:
 		return "Unknown"
 	}
